@@ -225,3 +225,9 @@ if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn on 0.0.0.0:%d", PORT)
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info")
+
+
+@app.get("/health")
+def health():
+    return {"status":"ok"}
+
