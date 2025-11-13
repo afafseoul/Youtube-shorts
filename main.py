@@ -64,31 +64,41 @@ def download_youtube(url: str, outpath: str) -> float:
     Download youtube video with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
 
-    IMPORTANT:
-    - Some yt-dlp versions return WARNINGs about JS runtime and exit with non-zero
-      even though the file is correctly downloaded.
-    - Here we *accept* non-zero exit code if the output file exists and is non-empty.
+    STRATÉGIE SIMPLE :
+    - On lance yt-dlp.
+    - On ignore totalement le code de retour.
+    - Si le fichier de sortie n'existe pas ou fait 0 octet => erreur.
+    - Sinon on continue avec ffprobe pour la durée.
     """
     cmd = [YTDLP_CMD, "-f", "best", "-o", outpath, url]
     logger.info("Downloading %s -> %s", url, outpath)
+
     res = run_cmd_capture(cmd, timeout=900)
+    stderr_short = (res.get("stderr") or "")[:500]
 
-    # Si yt-dlp a retourné un code non nul
-    if res["returncode"] != 0:
-        # On vérifie si le fichier existe quand même
-        if os.path.exists(outpath) and os.path.getsize(outpath) > 0:
-            logger.warning(
-                "yt-dlp exited with code %s but file exists (%s bytes). "
-                "Continuing. stderr (truncated): %s",
-                res["returncode"],
-                os.path.getsize(outpath),
-                res["stderr"][:300],
-            )
-        else:
-            logger.error("yt-dlp failed: %s", res["stderr"][:500])
-            raise HTTPException(status_code=500, detail=f"yt-dlp error: {res['stderr'][:200]}")
+    # 1) Vérifier si le fichier a été créé
+    if not os.path.exists(outpath) or os.path.getsize(outpath) == 0:
+        logger.error(
+            "yt-dlp failed, output file missing or empty. rc=%s, stderr=%s",
+            res.get("returncode"),
+            stderr_short,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"yt-dlp error: {stderr_short}",
+        )
 
-    # get duration using ffprobe
+    # 2) Log si rc != 0 (warning, mais on continue)
+    if res.get("returncode") != 0:
+        logger.warning(
+            "yt-dlp returned non-zero code (%s) but file exists (%s bytes). "
+            "Continuing. stderr (truncated): %s",
+            res.get("returncode"),
+            os.path.getsize(outpath),
+            stderr_short,
+        )
+
+    # 3) Récupérer la durée avec ffprobe
     p = run_cmd_capture([
         FFPROBE_CMD, "-v", "error",
         "-show_entries", "format=duration",
@@ -96,8 +106,12 @@ def download_youtube(url: str, outpath: str) -> float:
         outpath,
     ])
     if p["returncode"] != 0 or not p["stdout"].strip():
-        logger.warning("ffprobe couldn't read duration: %s", p["stderr"][:500])
+        logger.warning(
+            "ffprobe couldn't read duration: %s",
+            (p.get("stderr") or "")[:500],
+        )
         return 0.0
+
     try:
         duration = float(p["stdout"].strip())
         logger.info("Downloaded duration: %.2f s", duration)
@@ -105,6 +119,7 @@ def download_youtube(url: str, outpath: str) -> float:
     except Exception:
         logger.exception("Failed to parse duration from ffprobe output")
         return 0.0
+
 
 def transcribe_with_openai(file_path: str) -> str:
     """
