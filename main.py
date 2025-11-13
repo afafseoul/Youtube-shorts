@@ -63,27 +63,38 @@ def download_youtube(url: str, outpath: str) -> float:
     """
     Download youtube video with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
+
+    IMPORTANT:
+    - Some yt-dlp versions return WARNINGs about JS runtime and exit with non-zero
+      even though the file is correctly downloaded.
+    - Here we *accept* non-zero exit code if the output file exists and is non-empty.
     """
-    # IMPORTANT : plus de "-f best" pour éviter les erreurs de format
-    cmd = [YTDLP_CMD, "-o", outpath, url]
+    cmd = [YTDLP_CMD, "-f", "best", "-o", outpath, url]
     logger.info("Downloading %s -> %s", url, outpath)
     res = run_cmd_capture(cmd, timeout=900)
+
+    # Si yt-dlp a retourné un code non nul
     if res["returncode"] != 0:
-        logger.error("yt-dlp failed: %s", res["stderr"][:500])
-        raise HTTPException(status_code=500, detail=f"yt-dlp error: {res['stderr'][:200]}")
+        # On vérifie si le fichier existe quand même
+        if os.path.exists(outpath) and os.path.getsize(outpath) > 0:
+            logger.warning(
+                "yt-dlp exited with code %s but file exists (%s bytes). "
+                "Continuing. stderr (truncated): %s",
+                res["returncode"],
+                os.path.getsize(outpath),
+                res["stderr"][:300],
+            )
+        else:
+            logger.error("yt-dlp failed: %s", res["stderr"][:500])
+            raise HTTPException(status_code=500, detail=f"yt-dlp error: {res['stderr'][:200]}")
+
     # get duration using ffprobe
-    p = run_cmd_capture(
-        [
-            FFPROBE_CMD,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            outpath,
-        ]
-    )
+    p = run_cmd_capture([
+        FFPROBE_CMD, "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        outpath,
+    ])
     if p["returncode"] != 0 or not p["stdout"].strip():
         logger.warning("ffprobe couldn't read duration: %s", p["stderr"][:500])
         return 0.0
