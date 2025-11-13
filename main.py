@@ -121,6 +121,7 @@ def download_youtube(url: str, outpath: str) -> float:
         return 0.0
 
 
+
 def transcribe_with_openai(file_path: str) -> str:
     """
     Upload file to OpenAI Whisper endpoint and return transcript text.
