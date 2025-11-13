@@ -1,4 +1,4 @@
-# main.py -- FastAPI service minimal (corrected)
+# main.py -- FastAPI service minimal (corrected & tolerant yt-dlp)
 import os
 import subprocess
 import math
@@ -36,8 +36,7 @@ if OPENAI_KEY:
 else:
     logger.warning("OPENAI_API_KEY not set — endpoints that use OpenAI will return 503 until configured.")
 
-app = FastAPI(title="Youtube-shorts automation", version="0.2")
-
+app = FastAPI(title="Youtube-shorts automation", version="0.3")
 
 class ProcessRequest(BaseModel):
     youtube_url: str
@@ -53,7 +52,11 @@ def run_cmd_capture(cmd: List[str], timeout: Optional[int] = None) -> Dict[str, 
     logger.debug("run_cmd_capture: %s", cmd)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return {"returncode": p.returncode, "stdout": p.stdout or "", "stderr": p.stderr or ""}
+        return {
+            "returncode": p.returncode,
+            "stdout": p.stdout or "",
+            "stderr": p.stderr or "",
+        }
     except subprocess.TimeoutExpired as e:
         logger.error("Command timeout: %s", cmd)
         return {"returncode": 124, "stdout": "", "stderr": f"timeout: {e}"}
@@ -67,41 +70,33 @@ def download_youtube(url: str, outpath: str) -> float:
     Download youtube video with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
 
-    STRATÉGIE :
-    - On lance yt-dlp SANS -f best (laisse yt-dlp choisir).
-    - On IGNORE le code de retour (warnings JS, etc.).
-    - Si le fichier est manquant ou vide => erreur.
-    - Sinon on lit la durée avec ffprobe.
+    IMPORTANT:
+    - Certaines versions de yt-dlp retournent un code ≠ 0 tout en téléchargeant
+      correctement la vidéo (warnings JS runtime, SABR streaming, etc.).
+    - Ici on ignore donc totalement le code retour et on se base UNIQUEMENT
+      sur l’existence + la taille du fichier de sortie.
     """
-    cmd = [YTDLP_CMD, "-o", outpath, url]
+    cmd = [YTDLP_CMD, "-f", "best", "-o", outpath, url]
     logger.info("Downloading %s -> %s", url, outpath)
-
     res = run_cmd_capture(cmd, timeout=900)
-    stderr_short = (res.get("stderr") or "")[:500]
 
-    # 1) vérifier le fichier de sortie
+    # log complet pour debug
+    logger.info("yt-dlp returncode=%s", res["returncode"])
+    if res["stdout"]:
+        logger.debug("yt-dlp stdout: %s", res["stdout"][:500])
+    if res["stderr"]:
+        logger.warning("yt-dlp stderr: %s", res["stderr"][:500])
+
+    # on ne regarde PAS le returncode, seulement le fichier
     if not os.path.exists(outpath) or os.path.getsize(outpath) == 0:
-        logger.error(
-            "yt-dlp failed, output file missing or empty. rc=%s, stderr=%s",
-            res.get("returncode"),
-            stderr_short,
-        )
+        logger.error("yt-dlp did not produce a file at %s", outpath)
+        snippet = (res["stderr"] or res["stdout"])[:300]
         raise HTTPException(
             status_code=500,
-            detail=f"yt-dlp error: {stderr_short}",
+            detail=f"yt-dlp error: no output file. Logs: {snippet}"
         )
 
-    # 2) si code != 0 mais fichier OK -> on log juste un warning
-    if res.get("returncode") != 0:
-        logger.warning(
-            "yt-dlp returned non-zero code (%s) but file exists (%s bytes). "
-            "Continuing. stderr (truncated): %s",
-            res.get("returncode"),
-            os.path.getsize(outpath),
-            stderr_short,
-        )
-
-    # 3) durée avec ffprobe
+    # get duration using ffprobe
     p = run_cmd_capture([
         FFPROBE_CMD, "-v", "error",
         "-show_entries", "format=duration",
@@ -109,12 +104,8 @@ def download_youtube(url: str, outpath: str) -> float:
         outpath,
     ])
     if p["returncode"] != 0 or not p["stdout"].strip():
-        logger.warning(
-            "ffprobe couldn't read duration: %s",
-            (p.get("stderr") or "")[:500],
-        )
+        logger.warning("ffprobe couldn't read duration: %s", p["stderr"][:500])
         return 0.0
-
     try:
         duration = float(p["stdout"].strip())
         logger.info("Downloaded duration: %.2f s", duration)
@@ -156,7 +147,6 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
     """
     if not OPENAI_KEY:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured on server.")
-    # truncate transcript safely
     safe_transcript = transcript[:MAX_TRANSCRIPT_CHARS]
     prompt = (
         "You are given a transcription of a video. Return a JSON array of the best "
@@ -183,7 +173,7 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
     except requests.exceptions.RequestException as e:
         logger.exception("OpenAI chat completion failed")
         raise HTTPException(status_code=502, detail=f"OpenAI completion error: {e}")
-    # parse JSON with fallback
+
     try:
         data = json.loads(txt)
         if not isinstance(data, list):
@@ -208,17 +198,25 @@ def process(req: ProcessRequest, background: BackgroundTasks):
     Synchronous processing: download, transcribe, ask GPT, return clips.
     The heavy temp files are scheduled for cleanup in background.
     """
-    logger.info("Process request: url=%s mode=%s shorts_per_5min=%s", req.youtube_url, req.mode, req.shorts_per_5min)
+    logger.info(
+        "Process request: url=%s mode=%s shorts_per_5min=%s",
+        req.youtube_url, req.mode, req.shorts_per_5min
+    )
     tmpdir = tempfile.mkdtemp(prefix="ytshorts_")
     outpath = os.path.join(tmpdir, "video.mp4")
+
     # 1) download
     duration = download_youtube(req.youtube_url, outpath)
+
     # 2) compute number of shorts
     shorts_count = max(1, math.ceil((duration / 60.0) / 5.0 * float(req.shorts_per_5min)))
+
     # 3) transcribe
     transcript = transcribe_with_openai(outpath)
+
     # 4) ask GPT for clips
     clips = ask_gpt_for_clips(transcript, shorts_count, req.mode)
+
     # 5) normalize/clamp durations
     out_clips = []
     for i, c in enumerate(clips):
@@ -232,15 +230,11 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             e = s + 30.0
         dur = e - s
         if req.mode == "courte":
-            if dur < 15:
-                e = s + 15
-            if dur > 45:
-                e = s + 45
+            if dur < 15: e = s + 15
+            if dur > 45: e = s + 45
         else:
-            if dur < 61:
-                e = s + 61
-            if dur > 105:
-                e = s + 105
+            if dur < 61: e = s + 61
+            if dur > 105: e = s + 105
         out_clips.append({
             "index": int(c.get("index", i + 1)),
             "start": round(max(0.0, s), 2),
@@ -249,6 +243,7 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             "title": c.get("title", "") or "",
             "excerpt": c.get("excerpt", "") or ""
         })
+
     # schedule cleanup
     def cleanup(path=outpath, tmp=tmpdir):
         try:
@@ -259,6 +254,7 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             logger.info("Cleaned up %s", tmp)
         except Exception:
             logger.exception("Cleanup failed")
+
     background.add_task(cleanup)
     return {"video_url": req.youtube_url, "duration_seconds": duration, "shorts": out_clips}
 
