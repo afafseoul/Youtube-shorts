@@ -64,16 +64,26 @@ def download_youtube(url: str, outpath: str) -> float:
     Download youtube video with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
     """
-    cmd = [YTDLP_CMD, "-f", "best", "-o", outpath, url]
+    # IMPORTANT : plus de "-f best" pour éviter les erreurs de format
+    cmd = [YTDLP_CMD, "-o", outpath, url]
     logger.info("Downloading %s -> %s", url, outpath)
     res = run_cmd_capture(cmd, timeout=900)
     if res["returncode"] != 0:
         logger.error("yt-dlp failed: %s", res["stderr"][:500])
         raise HTTPException(status_code=500, detail=f"yt-dlp error: {res['stderr'][:200]}")
     # get duration using ffprobe
-    p = run_cmd_capture([FFPROBE_CMD, "-v", "error",
-                        "-show_entries", "format=duration",
-                        "-of", "default=noprint_wrappers=1:nokey=1", outpath])
+    p = run_cmd_capture(
+        [
+            FFPROBE_CMD,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            outpath,
+        ]
+    )
     if p["returncode"] != 0 or not p["stdout"].strip():
         logger.warning("ffprobe couldn't read duration: %s", p["stderr"][:500])
         return 0.0
@@ -132,7 +142,7 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 1500
+        "max_tokens": 1500,
     }
     logger.info("Requesting GPT for %d clips (mode=%s)", desired_count, mode)
     try:
@@ -151,7 +161,7 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
         return data
     except Exception:
         import re
-        m = re.search(r'(\[.*\])', txt, re.S)
+        m = re.search(r"(\[.*\])", txt, re.S)
         if m:
             try:
                 data = json.loads(m.group(1))
@@ -167,7 +177,12 @@ def process(req: ProcessRequest, background: BackgroundTasks):
     Synchronous processing: download, transcribe, ask GPT, return clips.
     The heavy temp files are scheduled for cleanup in background.
     """
-    logger.info("Process request: url=%s mode=%s shorts_per_5min=%s", req.youtube_url, req.mode, req.shorts_per_5min)
+    logger.info(
+        "Process request: url=%s mode=%s shorts_per_5min=%s",
+        req.youtube_url,
+        req.mode,
+        req.shorts_per_5min,
+    )
     tmpdir = tempfile.mkdtemp(prefix="ytshorts_")
     outpath = os.path.join(tmpdir, "video.mp4")
     # 1) download
@@ -191,19 +206,25 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             e = s + 30.0
         dur = e - s
         if req.mode == "courte":
-            if dur < 15: e = s + 15
-            if dur > 45: e = s + 45
+            if dur < 15:
+                e = s + 15
+            if dur > 45:
+                e = s + 45
         else:
-            if dur < 61: e = s + 61
-            if dur > 105: e = s + 105
-        out_clips.append({
-            "index": int(c.get("index", i + 1)),
-            "start": round(max(0.0, s), 2),
-            "end": round(max(s + 0.01, e), 2),
-            "duration": round(max(0.0, e - s), 2),
-            "title": c.get("title", "") or "",
-            "excerpt": c.get("excerpt", "") or ""
-        })
+            if dur < 61:
+                e = s + 61
+            if dur > 105:
+                e = s + 105
+        out_clips.append(
+            {
+                "index": int(c.get("index", i + 1)),
+                "start": round(max(0.0, s), 2),
+                "end": round(max(s + 0.01, e), 2),
+                "duration": round(max(0.0, e - s), 2),
+                "title": c.get("title", "") or "",
+                "excerpt": c.get("excerpt", "") or "",
+            }
+        )
     # schedule cleanup
     def cleanup(path=outpath, tmp=tmpdir):
         try:
@@ -214,6 +235,7 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             logger.info("Cleaned up %s", tmp)
         except Exception:
             logger.exception("Cleanup failed")
+
     background.add_task(cleanup)
     return {"video_url": req.youtube_url, "duration_seconds": duration, "shorts": out_clips}
 
@@ -221,13 +243,11 @@ def process(req: ProcessRequest, background: BackgroundTasks):
 def root():
     return {"status": "ok", "service": "youtube-shorts", "openai": bool(OPENAI_KEY), "port": PORT}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn on 0.0.0.0:%d", PORT)
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info")
-
-
-@app.get("/health")
-def health():
-    return {"status":"ok"}
-
