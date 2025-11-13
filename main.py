@@ -38,10 +38,12 @@ else:
 
 app = FastAPI(title="Youtube-shorts automation", version="0.2")
 
+
 class ProcessRequest(BaseModel):
     youtube_url: str
     mode: str = "courte"   # "courte" or "longue"
     shorts_per_5min: float = 1.0   # multiplier
+
 
 def run_cmd_capture(cmd: List[str], timeout: Optional[int] = None) -> Dict[str, Any]:
     """
@@ -59,24 +61,25 @@ def run_cmd_capture(cmd: List[str], timeout: Optional[int] = None) -> Dict[str, 
         logger.exception("Command failed: %s", cmd)
         return {"returncode": 1, "stdout": "", "stderr": str(e)}
 
+
 def download_youtube(url: str, outpath: str) -> float:
     """
     Download youtube video with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
 
-    STRATÉGIE SIMPLE :
-    - On lance yt-dlp.
-    - On ignore totalement le code de retour.
-    - Si le fichier de sortie n'existe pas ou fait 0 octet => erreur.
-    - Sinon on continue avec ffprobe pour la durée.
+    STRATÉGIE :
+    - On lance yt-dlp SANS -f best (laisse yt-dlp choisir).
+    - On IGNORE le code de retour (warnings JS, etc.).
+    - Si le fichier est manquant ou vide => erreur.
+    - Sinon on lit la durée avec ffprobe.
     """
-    cmd = [YTDLP_CMD, "-f", "best", "-o", outpath, url]
+    cmd = [YTDLP_CMD, "-o", outpath, url]
     logger.info("Downloading %s -> %s", url, outpath)
 
     res = run_cmd_capture(cmd, timeout=900)
     stderr_short = (res.get("stderr") or "")[:500]
 
-    # 1) Vérifier si le fichier a été créé
+    # 1) vérifier le fichier de sortie
     if not os.path.exists(outpath) or os.path.getsize(outpath) == 0:
         logger.error(
             "yt-dlp failed, output file missing or empty. rc=%s, stderr=%s",
@@ -88,7 +91,7 @@ def download_youtube(url: str, outpath: str) -> float:
             detail=f"yt-dlp error: {stderr_short}",
         )
 
-    # 2) Log si rc != 0 (warning, mais on continue)
+    # 2) si code != 0 mais fichier OK -> on log juste un warning
     if res.get("returncode") != 0:
         logger.warning(
             "yt-dlp returned non-zero code (%s) but file exists (%s bytes). "
@@ -98,7 +101,7 @@ def download_youtube(url: str, outpath: str) -> float:
             stderr_short,
         )
 
-    # 3) Récupérer la durée avec ffprobe
+    # 3) durée avec ffprobe
     p = run_cmd_capture([
         FFPROBE_CMD, "-v", "error",
         "-show_entries", "format=duration",
@@ -119,7 +122,6 @@ def download_youtube(url: str, outpath: str) -> float:
     except Exception:
         logger.exception("Failed to parse duration from ffprobe output")
         return 0.0
-
 
 
 def transcribe_with_openai(file_path: str) -> str:
@@ -147,6 +149,7 @@ def transcribe_with_openai(file_path: str) -> str:
         logger.exception("OpenAI transcription request failed")
         raise HTTPException(status_code=502, detail=f"OpenAI transcription error: {e}")
 
+
 def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Dict[str, Any]]:
     """
     Ask OpenAI chat completions to propose clips. Returns parsed JSON list.
@@ -169,7 +172,7 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 1500,
+        "max_tokens": 1500
     }
     logger.info("Requesting GPT for %d clips (mode=%s)", desired_count, mode)
     try:
@@ -188,7 +191,7 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
         return data
     except Exception:
         import re
-        m = re.search(r"(\[.*\])", txt, re.S)
+        m = re.search(r'(\[.*\])', txt, re.S)
         if m:
             try:
                 data = json.loads(m.group(1))
@@ -198,18 +201,14 @@ def ask_gpt_for_clips(transcript: str, desired_count: int, mode: str) -> List[Di
         logger.error("GPT response parsing failed. Raw start: %s", txt[:500])
         raise HTTPException(status_code=502, detail="Failed to parse GPT response as JSON.")
 
+
 @app.post("/process")
 def process(req: ProcessRequest, background: BackgroundTasks):
     """
     Synchronous processing: download, transcribe, ask GPT, return clips.
     The heavy temp files are scheduled for cleanup in background.
     """
-    logger.info(
-        "Process request: url=%s mode=%s shorts_per_5min=%s",
-        req.youtube_url,
-        req.mode,
-        req.shorts_per_5min,
-    )
+    logger.info("Process request: url=%s mode=%s shorts_per_5min=%s", req.youtube_url, req.mode, req.shorts_per_5min)
     tmpdir = tempfile.mkdtemp(prefix="ytshorts_")
     outpath = os.path.join(tmpdir, "video.mp4")
     # 1) download
@@ -242,16 +241,14 @@ def process(req: ProcessRequest, background: BackgroundTasks):
                 e = s + 61
             if dur > 105:
                 e = s + 105
-        out_clips.append(
-            {
-                "index": int(c.get("index", i + 1)),
-                "start": round(max(0.0, s), 2),
-                "end": round(max(s + 0.01, e), 2),
-                "duration": round(max(0.0, e - s), 2),
-                "title": c.get("title", "") or "",
-                "excerpt": c.get("excerpt", "") or "",
-            }
-        )
+        out_clips.append({
+            "index": int(c.get("index", i + 1)),
+            "start": round(max(0.0, s), 2),
+            "end": round(max(s + 0.01, e), 2),
+            "duration": round(max(0.0, e - s), 2),
+            "title": c.get("title", "") or "",
+            "excerpt": c.get("excerpt", "") or ""
+        })
     # schedule cleanup
     def cleanup(path=outpath, tmp=tmpdir):
         try:
@@ -262,17 +259,19 @@ def process(req: ProcessRequest, background: BackgroundTasks):
             logger.info("Cleaned up %s", tmp)
         except Exception:
             logger.exception("Cleanup failed")
-
     background.add_task(cleanup)
     return {"video_url": req.youtube_url, "duration_seconds": duration, "shorts": out_clips}
+
 
 @app.get("/")
 def root():
     return {"status": "ok", "service": "youtube-shorts", "openai": bool(OPENAI_KEY), "port": PORT}
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     import uvicorn
