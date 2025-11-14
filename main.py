@@ -47,6 +47,9 @@ YTDLP_CMD = os.getenv("YTDLP_CMD", "yt-dlp")  # override if needed
 FFPROBE_CMD = os.getenv("FFPROBE_CMD", "ffprobe")
 FFMPEG_CMD = os.getenv("FFMPEG_CMD", "ffmpeg")
 
+# chemin optionnel vers le fichier de cookies yt-dlp
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")
+
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", 80000))
 
 # limite de taille d'audio par requête OpenAI (en Mo) – marge de sécurité
@@ -190,10 +193,19 @@ def download_youtube_audio(url: str, outpath: str) -> float:
     Download ONLY audio from youtube with yt-dlp to outpath.
     Returns duration (seconds) or raises HTTPException on failure.
 
-    On ignore le code retour de yt-dlp et on se base sur l'existence + taille du fichier.
+    On se base sur l'existence + taille du fichier pour valider le download.
+    Utilise éventuellement un fichier de cookies (YTDLP_COOKIES) si défini.
     """
-    # -x = extract audio, --audio-format mp3 pour un format simple
-    cmd = [YTDLP_CMD, "-x", "--audio-format", "mp3", "-o", outpath, url]
+    cmd: List[str] = [YTDLP_CMD, "-x", "--audio-format", "mp3"]
+
+    if YTDLP_COOKIES:
+        logger.info("Using cookies file: %s", YTDLP_COOKIES)
+        cmd.extend(["--cookies", YTDLP_COOKIES])
+    else:
+        logger.warning("YTDLP_COOKIES not set, running yt-dlp without cookies")
+
+    cmd.extend(["-o", outpath, url])
+
     logger.info("Downloading audio %s -> %s", url, outpath)
     res = run_cmd_capture(cmd, timeout=1800)
 
