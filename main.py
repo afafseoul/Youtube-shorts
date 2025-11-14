@@ -69,7 +69,7 @@ GOOGLE_CREDENTIALS_PATH = os.getenv(
     "/etc/secrets/credentials.json",  # à adapter si besoin
 )
 
-SPREADSHEET_ID = "1G7NKc76jtqCeCylTaU2S1UArTLYKJirxb563hlhyBOYo"
+SPREADSHEET_ID = "1G7NKc76jtqCeCyTlaUZ1UArTLYKJjrxb563hlhyBOYo"
 SHEET_NAME = "Feuille 1"
 
 # colonnes (lettres)
